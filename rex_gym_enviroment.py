@@ -105,10 +105,12 @@ class QuadrupedEnv(gym.Env):
 
         # Reward = height stability + orientation uprightness
         height = base_pos[2]
+        roll, pitch, yaw = p.getEulerFromQuaternion(base_orn) # roll = sideways, ptich = forward/backward, yaw = left/right
         up_vector = p.getMatrixFromQuaternion(base_orn)[6]  # z-vector
-        reward = 1.0 * height + 2.0 * up_vector + 0.5 *forward_vel
+        backward_penalty = max(0, -pitch)
+        reward = 1.0 * height + 2.0 * up_vector + 0.8 *forward_vel - (backward_penalty)
 
-        done = height < 0.2  # did not walk
+        done = height < 0.2 or pitch < -0.7 or pitch > 0.7 # did not walk or just felly fell
         info = {}
         return obs, reward, done, info
 
@@ -126,9 +128,9 @@ class QuadrupedEnv(gym.Env):
         p.disconnect(self.physics_client) # stop rex forever :(
 
 if __name__ == "__main__":
-    env = QuadrupedEnv(render=True)
+    env = QuadrupedEnv(render=False)
     ppo_model = PPO("MlpPolicy", env, verbose=1)
-    ppo_model.learn(total_timesteps=2000)
+    ppo_model.learn(total_timesteps=100000)
     ppo_model.save("ppo_hello")
 
     del ppo_model
