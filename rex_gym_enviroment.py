@@ -5,6 +5,10 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 
+def calculate_distance(Currposition, endPosition): # [x,y,z]
+    distance_to_target = math.sqrt(math.pow(endPosition[0]-Currposition[0],2)+math.pow(endPosition[1]-Currposition[1],2)+math.pow(endPosition[2]-Currposition[2],2))
+    return distance_to_target
+
 class RexLeg:
     def __init__(self, robot_id, leg_id, joints):
         self.robot_id = robot_id
@@ -87,9 +91,10 @@ class QuadrupedEnv(gym.Env):
         # actionspace is 12 joints 3 per leg (4th is fixed)
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
 
+
     def step(self, action):
         self.counter += 1
-        base_pose = [0.0, 0.6, -1.2]
+        base_pose = [0.0, 0.4, -0.6] # default pose for each leg [hip, upper, lower]
 
         # split action into 4 legs × 3 joints
         action = np.clip(action, -1.0, 1.0).reshape(4, 3)
@@ -104,21 +109,20 @@ class QuadrupedEnv(gym.Env):
         base_pos, base_orn = p.getBasePositionAndOrientation(self.rex.robot_id) #reward
         base_lin_vel, base_ang_vel = p.getBaseVelocity(self.rex.robot_id)       # base velocity (linear,angular (m/s))
         forward_vel = base_lin_vel[0]
+        distance_to_target = calculate_distance(base_pos,self.rex.end_pos)
 
         # Reward = height stability + orientation uprightness
         height = base_pos[2]
         roll, pitch, yaw = p.getEulerFromQuaternion(base_orn) # roll = sideways, ptich = forward/backward, yaw = left/right
         up_vector = p.getMatrixFromQuaternion(base_orn)[6]  # z-vector
         backward_penalty = max(0, -pitch)
-        reward = 1.0 * height + 2.0 * up_vector + 0.8 *forward_vel - (backward_penalty)
+        forward_reward = max(0, pitch)
+        reward = 0.5*forward_reward+1.0 * height + 2.0 * up_vector + 0.8 *forward_vel - (5* distance_to_target) - 10*backward_penalty
 
         done = height < 0.2 or pitch < -0.7 or pitch > 0.7 # did not walk or just felly fell
         info = {}
         return obs, reward, done, info
-    
-    def calculate_distance(Currposition, endPosition): # [x,y,z]
-        distance_to_target = math.sqrt(math.pow(endPosition[0]-Currposition[0],2)+math.pow(endPosition[1]-Currposition[1],2)+math.pow(endPosition[2]-Currposition[2],2))
-        return distance_to_target
+
 
     def reset(self):
         p.resetSimulation()
@@ -126,7 +130,7 @@ class QuadrupedEnv(gym.Env):
         p.setGravity(0, 0, -9.8)
         p.setTimeStep(self.time_step)
         self.plane_id = p.loadURDF("plane.urdf")
-        self.rex = Rex("aliengo/aliengo.urdf", [0, 0, 0.6])
+        self.rex = Rex("aliengo/aliengo.urdf", [0, 0, 0.6],[5,5,0.45])
         self.counter = 0
         return self.rex.get_observation()
 
@@ -144,7 +148,7 @@ if __name__ == "__main__":
     ppo_model = PPO.load("ppo_hello")
 
     obs = env.reset()
-    for _ in range(2500):
+    for _ in range(1000):
         action,_ = ppo_model.predict(obs, deterministic=True)
         obs, reward, done, info = env.step(action)
         if done:
