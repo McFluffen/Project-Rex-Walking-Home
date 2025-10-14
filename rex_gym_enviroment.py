@@ -1,5 +1,5 @@
 import pybullet as p
-import pybullet_data,gym,time
+import pybullet_data,gym,time,math
 import numpy as np
 
 from stable_baselines3 import PPO
@@ -23,7 +23,7 @@ class RexLeg:
                 force=float(np.clip(torque, -max_force, max_force))
             )
 class Rex:
-    def __init__(self, urdf_path, start_position):
+    def __init__(self, urdf_path, start_position,end_position):
         self.robot_id = p.loadURDF(urdf_path, start_position)
         self.num_joints = p.getNumJoints(self.robot_id)
         self.legs = self.init_legs()
@@ -35,6 +35,8 @@ class Rex:
                 controlMode=p.VELOCITY_CONTROL,
                 force=0
             )
+        self.start_pos  = start_position    # rex start position        (x,y,z)
+        self.end_pos    = end_position      # rexs desired end position (x,y,z)  
 
     def init_legs(self):
         leg_joint_map = {
@@ -76,7 +78,7 @@ class QuadrupedEnv(gym.Env):
         p.setTimeStep(self.time_step)
 
         self.plane_id = p.loadURDF("plane.urdf")
-        self.rex = Rex("aliengo/aliengo.urdf", [0, 0, 0.45])
+        self.rex = Rex("aliengo/aliengo.urdf", [0, 0, 0.45],[5,5,0.45])
         self.counter = 0
 
         obs_dim = len(self.rex.get_observation())
@@ -113,6 +115,10 @@ class QuadrupedEnv(gym.Env):
         done = height < 0.2 or pitch < -0.7 or pitch > 0.7 # did not walk or just felly fell
         info = {}
         return obs, reward, done, info
+    
+    def calculate_distance(Currposition, endPosition): # [x,y,z]
+        distance_to_target = math.sqrt(math.pow(endPosition[0]-Currposition[0],2)+math.pow(endPosition[1]-Currposition[1],2)+math.pow(endPosition[2]-Currposition[2],2))
+        return distance_to_target
 
     def reset(self):
         p.resetSimulation()
@@ -128,7 +134,7 @@ class QuadrupedEnv(gym.Env):
         p.disconnect(self.physics_client) # stop rex forever :(
 
 if __name__ == "__main__":
-    env = QuadrupedEnv(render=False)
+    env = QuadrupedEnv(render=True)
     ppo_model = PPO("MlpPolicy", env, verbose=1)
     ppo_model.learn(total_timesteps=100000)
     ppo_model.save("ppo_hello")
