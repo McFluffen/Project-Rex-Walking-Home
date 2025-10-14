@@ -4,10 +4,13 @@ import numpy as np
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 def calculate_distance(Currposition, endPosition): # [x,y,z]
     distance_to_target = math.sqrt(math.pow(endPosition[0]-Currposition[0],2)+math.pow(endPosition[1]-Currposition[1],2)+math.pow(endPosition[2]-Currposition[2],2))
     return distance_to_target
+
+
 
 class RexLeg:
     def __init__(self, robot_id, leg_id, joints):
@@ -111,6 +114,7 @@ class QuadrupedEnv(gym.Env):
         forward_vel = base_lin_vel[0]
         distance_to_target = calculate_distance(base_pos,self.rex.end_pos)
 
+
         # Reward = height stability + orientation uprightness
         height = base_pos[2]
         roll, pitch, yaw = p.getEulerFromQuaternion(base_orn) # roll = sideways, ptich = forward/backward, yaw = left/right
@@ -137,10 +141,22 @@ class QuadrupedEnv(gym.Env):
     def close(self):
         p.disconnect(self.physics_client) # stop rex forever :(
 
+def make_env(rank=0, seed=0):
+    def _init():
+        env = QuadrupedEnv(render=False)
+        return env
+    return _init
+
+
 if __name__ == "__main__":
-    env = QuadrupedEnv(render=True)
-    ppo_model = PPO("MlpPolicy", env, verbose=1)
-    ppo_model.learn(total_timesteps=100000)
+    num_enviroments = 100 # code for making multiple enviroments 
+    if (num_enviroments > 1 ):
+        env = DummyVecEnv([make_env(i) for i in range(4)])
+    else:   
+        env = QuadrupedEnv(render=True)
+
+    ppo_model = PPO("MlpPolicy", env, verbose=0)
+    ppo_model.learn(total_timesteps=10000)
     ppo_model.save("ppo_hello")
 
     del ppo_model
