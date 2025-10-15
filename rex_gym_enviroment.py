@@ -1,16 +1,18 @@
 import pybullet as p
-import pybullet_data,gym,time,math
+import pybullet_data,gymnasium ,time,math
 import numpy as np
+import os
 
-from stable_baselines3 import PPO
+from stable_baselines3 import SAC
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, CallbackList
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.logger import configure, Logger
 
 def calculate_distance(Currposition, endPosition): # [x,y,z]
     distance_to_target = math.sqrt(math.pow(endPosition[0]-Currposition[0],2)+math.pow(endPosition[1]-Currposition[1],2)+math.pow(endPosition[2]-Currposition[2],2))
     return distance_to_target
-
-
 
 class RexLeg:
     def __init__(self, robot_id, leg_id, joints):
@@ -70,7 +72,7 @@ class Rex:
         return np.array(obs, dtype=np.float32)
 
 
-class QuadrupedEnv(gym.Env):
+class QuadrupedEnv(gymnasium.Env):
     def __init__(self, render=True):
         super().__init__()
 
@@ -84,18 +86,21 @@ class QuadrupedEnv(gym.Env):
         self.time_step = 1 / 240
         p.setTimeStep(self.time_step)
 
+        self.max_episode_steps = 2000
+
         self.plane_id = p.loadURDF("plane.urdf")
         self.rex = Rex("aliengo/aliengo.urdf", [0, 0, 0.45],[5,5,0.45])
         self.counter = 0
 
         obs_dim = len(self.rex.get_observation())
-        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
+        self.observation_space = gymnasium.spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
         # actionspace is 12 joints 3 per leg (4th is fixed)
-        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
+        self.action_space = gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
 
 
     def step(self, action):
+        done = False
         self.counter += 1
         base_pose = [0.0, 0.4, -0.6] # default pose for each leg [hip, upper, lower]
 
@@ -106,7 +111,6 @@ class QuadrupedEnv(gym.Env):
             leg.set_pd_control(target_positions, kp=35, kd=1.0, max_force=45)
 
         p.stepSimulation()
-        time.sleep(self.time_step)
 
         obs = self.rex.get_observation() # observartion
         base_pos, base_orn = p.getBasePositionAndOrientation(self.rex.robot_id) #reward
@@ -114,59 +118,128 @@ class QuadrupedEnv(gym.Env):
         forward_vel = base_lin_vel[0]
         distance_to_target = calculate_distance(base_pos,self.rex.end_pos)
 
-
         # Reward = height stability + orientation uprightness
-        height = base_pos[2]
+        r_height = base_pos[2]
         roll, pitch, yaw = p.getEulerFromQuaternion(base_orn) # roll = sideways, ptich = forward/backward, yaw = left/right
-        up_vector = p.getMatrixFromQuaternion(base_orn)[6]  # z-vector
-        backward_penalty = max(0, -pitch)
-        forward_reward = max(0, pitch)
-        reward = 0.5*forward_reward+1.0 * height + 2.0 * up_vector + 0.8 *forward_vel - (5* distance_to_target) - 10*backward_penalty
+        r_up_vector = p.getMatrixFromQuaternion(base_orn)[6]  # z-vector
+        r_backward_penalty = max(0, -pitch)
+        r_forward_reward = max(0, pitch)
+        progress = self.prev_distance - distance_to_target
 
-        done = height < 0.2 or pitch < -0.7 or pitch > 0.7 # did not walk or just felly fell
+        reward = (
+            # rewards
+             1.0 * r_height
+            + 2.0 * r_up_vector
+            + 2.0 * r_forward_reward
+            + 2.8 * progress
+            # penalties
+            # small penality for many actions, to make it use less hopefully
+            - 0.002 * np.sum(np.square(action))
+        )
+
+        #done = height < 0.2 or pitch < -0.7 or pitch > 0.7 # did not walk or just felly fell
+        if r_height < 0.3 or pitch < -0.7 or pitch > 0.7:
+            done = True
+            reward-=100
+        if distance_to_target == 0:
+            print("Reached Goal")
+            done = True
+            reward+=100
+
+        self.prev_distance = distance_to_target
+        terminated = done
+        truncated = self.counter > self.max_episode_steps
         info = {}
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
 
-
-    def reset(self):
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
         p.resetSimulation()
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.8)
         p.setTimeStep(self.time_step)
         self.plane_id = p.loadURDF("plane.urdf")
         self.rex = Rex("aliengo/aliengo.urdf", [0, 0, 0.6],[5,5,0.45])
+        self.prev_distance = calculate_distance(self.rex.start_pos, self.rex.end_pos)
         self.counter = 0
-        return self.rex.get_observation()
+
+        goal_vis = p.createVisualShape(
+            shapeType=p.GEOM_SPHERE,
+            radius=0.1,
+            rgbaColor=[1, 0, 0, 1]
+        )
+        goal_marker = p.createMultiBody(
+            baseVisualShapeIndex=goal_vis,
+            basePosition=self.rex.end_pos
+        )
+
+        info = {}
+        return self.rex.get_observation(), info
 
     def close(self):
-        p.disconnect(self.physics_client) # stop rex forever :(
+        p.disconnect(self.physics_client) # stop rex forever :( NO RIP REX MY GUY MY G SAD RIP AMEN REST IN PEPERINO ((((
 
 def make_env(rank=0, seed=0):
     def _init():
         env = QuadrupedEnv(render=False)
+        env = Monitor(env)
         return env
     return _init
 
+run_model = False
+model_name = "SAC_model"
 
 if __name__ == "__main__":
-    num_enviroments = 100 # code for making multiple enviroments 
-    if (num_enviroments > 1 ):
-        env = DummyVecEnv([make_env(i) for i in range(4)])
-    else:   
+    log_dir = "./logs/"
+    checkpoint_dir ="./checkpoints/"
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    if run_model:
         env = QuadrupedEnv(render=True)
+        ppo_model = SAC.load(model_name)
+        obs, _ = env.reset()
+        done = False
+        while not done:
+            action,_ = ppo_model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+        env.close()
+    else:
+        num_enviroments = 1 # code for making multiple enviroments 
+        if (num_enviroments > 1 ):
+            env = DummyVecEnv([make_env(i) for i in range(num_enviroments)])
+        else:   
+            env = QuadrupedEnv(render=True)
+            env = Monitor(env)
 
-    ppo_model = PPO("MlpPolicy", env, verbose=0)
-    ppo_model.learn(total_timesteps=10000)
-    ppo_model.save("ppo_hello")
+        eval_env = QuadrupedEnv(render=False)
+        eval_callback = EvalCallback(
+            eval_env,
+            best_model_save_path=log_dir,
+            log_path=log_dir,
+            eval_freq=10000,
+            deterministic=True,
+            render=False
+        )
 
-    del ppo_model
+        logger = configure(log_dir, ["stdout", "tensorboard"])
 
-    ppo_model = PPO.load("ppo_hello")
+        checkpoint_callback = CheckpointCallback(
+            save_freq=50000,
+            save_path="./checkpoints/",
+            name_prefix="SAC_rex"
+            )
 
-    obs = env.reset()
-    for _ in range(1000):
-        action,_ = ppo_model.predict(obs, deterministic=True)
-        obs, reward, done, info = env.step(action)
-        if done:
-            obs = env.reset()
-    env.close()
+        ppo_model = SAC(
+            "MlpPolicy",
+            env,
+            verbose=1,
+            tensorboard_log=log_dir,
+            learning_rate=1e-4)
+        
+        ppo_model.set_logger(logger)
+        callback = CallbackList([checkpoint_callback, eval_callback])
+        ppo_model.learn(total_timesteps=20000, progress_bar=True, callback=callback)
+        ppo_model.save(model_name)
+
+        del ppo_model
