@@ -5,7 +5,7 @@ import os
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.logger import configure, Logger
@@ -106,9 +106,10 @@ class QuadrupedEnv(gymnasium.Env):
 
         # split action into 4 legs × 3 joints
         action = np.clip(action, -1.0, 1.0).reshape(4, 3)
+        scales = [0.30, 0.60, 0.90]
         for leg, act in zip(self.rex.legs, action):
-            target_positions = [bp + 0.3 * a for bp, a in zip(base_pose, act)]
-            leg.set_pd_control(target_positions, kp=35, kd=1.0, max_force=45)
+            target_positions = [bp + s * a for bp, s, a in zip(base_pose, scales, act)]
+            leg.set_pd_control(target_positions, kp=35, kd=1.0, max_force=50)
 
         p.stepSimulation()
 
@@ -121,27 +122,32 @@ class QuadrupedEnv(gymnasium.Env):
         # Reward = height stability + orientation uprightness
         r_height = base_pos[2]
         roll, pitch, yaw = p.getEulerFromQuaternion(base_orn) # roll = sideways, ptich = forward/backward, yaw = left/right
-        r_up_vector = p.getMatrixFromQuaternion(base_orn)[6]  # z-vector
-        r_backward_penalty = max(0, -pitch)
-        r_forward_reward = max(0, pitch)
+        r_up_vector = p.getMatrixFromQuaternion(base_orn)[8]  # z-vector
+
+        v = max(0.0, forward_vel)
+        r_forward = np.tanh(v / 2.0)
+
         progress = self.prev_distance - distance_to_target
+        progress_cap = 0.03
+        r_progress = np.clip(progress / progress_cap, -1.0, 1.0)
+
+        r_upright = max(0, r_up_vector)
 
         reward = (
             # rewards
-             1.0 * r_height
-            + 2.0 * r_up_vector
-            + 2.0 * r_forward_reward
-            + 2.8 * progress
+            0.6 * r_forward
+            + 1.2 * r_progress
+            + 0.5 * r_upright
             # penalties
             # small penality for many actions, to make it use less hopefully
-            - 0.002 * np.sum(np.square(action))
+            - 0.001 * np.sum(np.square(action))
         )
 
         #done = height < 0.2 or pitch < -0.7 or pitch > 0.7 # did not walk or just felly fell
         if r_height < 0.3 or pitch < -0.7 or pitch > 0.7:
             done = True
-            reward-=100
-        if distance_to_target == 0:
+            reward = -5
+        if distance_to_target < 0.1:
             print("Reached Goal")
             done = True
             reward+=100
@@ -185,8 +191,10 @@ def make_env(rank=0, seed=0):
         return env
     return _init
 
-run_model = False
+run_model = True
 model_name = "SAC_model"
+model_xx = "./old_models/front_flip"
+seed = 66
 
 if __name__ == "__main__":
     log_dir = "./logs/"
@@ -195,51 +203,57 @@ if __name__ == "__main__":
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     if run_model:
-        env = QuadrupedEnv(render=True)
-        ppo_model = SAC.load(model_name)
-        obs, _ = env.reset()
+        env = DummyVecEnv([lambda: QuadrupedEnv(render=True)])
+
+        model = SAC.load(model_name, env)
+        obs = env.reset()
         done = False
-        while not done:
-            action,_ = ppo_model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
+        for _ in range(10):
+            while not done:
+                action,_ = model.predict(obs, deterministic=False)
+                obs, reward, done, info = env.step(action)
+                #done = terminated or truncated
+                env.render()
+            env.reset()
+            done = False
         env.close()
     else:
-        num_enviroments = 1 # code for making multiple enviroments 
+        num_enviroments = 128 # code for making multiple enviroments 
         if (num_enviroments > 1 ):
-            env = DummyVecEnv([make_env(i) for i in range(num_enviroments)])
+            env = DummyVecEnv([make_env(i, seed) for i in range(num_enviroments)])
         else:   
-            env = QuadrupedEnv(render=True)
-            env = Monitor(env)
+            env = DummyVecEnv([lambda: Monitor(QuadrupedEnv(render=False))])
 
-        eval_env = QuadrupedEnv(render=False)
+
+        eval_env = DummyVecEnv([make_env(888, seed)])
         eval_callback = EvalCallback(
             eval_env,
             best_model_save_path=log_dir,
             log_path=log_dir,
-            eval_freq=10000,
+            eval_freq=100_000 // num_enviroments,
             deterministic=True,
             render=False
         )
 
         logger = configure(log_dir, ["stdout", "tensorboard"])
 
+        save_freq = 500_000 // num_enviroments
         checkpoint_callback = CheckpointCallback(
-            save_freq=50000,
+            save_freq=save_freq,
             save_path="./checkpoints/",
             name_prefix="SAC_rex"
             )
 
-        ppo_model = SAC(
+        sac_model = SAC(
             "MlpPolicy",
             env,
             verbose=1,
             tensorboard_log=log_dir,
             learning_rate=1e-4)
         
-        ppo_model.set_logger(logger)
+        sac_model.set_logger(logger)
         callback = CallbackList([checkpoint_callback, eval_callback])
-        ppo_model.learn(total_timesteps=20000, progress_bar=True, callback=callback)
-        ppo_model.save(model_name)
+        sac_model.learn(total_timesteps=5_000_000, progress_bar=True, callback=callback)
+        sac_model.save(model_name)
 
-        del ppo_model
+        del sac_model
