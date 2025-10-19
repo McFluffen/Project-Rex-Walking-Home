@@ -86,7 +86,7 @@ class QuadrupedEnv(gymnasium.Env):
         self.time_step = 1 / 240
         p.setTimeStep(self.time_step)
 
-        self.max_episode_steps = 2000
+        self.max_episode_steps = 4000
 
         self.plane_id = p.loadURDF("plane.urdf")
         self.rex = Rex("aliengo/aliengo.urdf", [0, 0, 0.45],[5,5,0.45])
@@ -125,37 +125,47 @@ class QuadrupedEnv(gymnasium.Env):
         r_up_vector = p.getMatrixFromQuaternion(base_orn)[8]  # z-vector
 
         v = max(0.0, forward_vel)
-        r_forward = np.tanh(v / 2.0)
+        r_forward = np.tanh(v / 7.0)
 
         progress = self.prev_distance - distance_to_target
         progress_cap = 0.03
         r_progress = np.clip(progress / progress_cap, -1.0, 1.0)
 
         r_upright = max(0, r_up_vector)
+        r_height_bonus = np.clip((r_height - 0.25) / 0.25, 0.0, 1.0)
+        r_pitch = 1 - abs(pitch)
+        r_roll = 1 -abs(roll)
+        r_stable = (r_pitch + r_roll) / 2
+
+        # r_survival = self.counter / self.max_episode_steps
+        # r_movement = r_forward * r_survival
+        # r_survival_speed = (self.counter / self.max_episode_steps) * r_forward
 
         reward = (
             # rewards
-            0.6 * r_forward
-            + 1.2 * r_progress
-            + 0.5 * r_upright
+            1.0 * r_forward
+            + 0.8 * r_upright
+            + 0.8 * r_height_bonus
+            + 0.4 * r_stable
+            + 2.0 * r_forward
             # penalties
             # small penality for many actions, to make it use less hopefully
-            - 0.001 * np.sum(np.square(action))
+            # -0.002 * np.sum(np.square(action))
         )
 
+        info = {}
         #done = height < 0.2 or pitch < -0.7 or pitch > 0.7 # did not walk or just felly fell
-        if r_height < 0.3 or pitch < -0.7 or pitch > 0.7:
+        if r_height < 0.15 or abs(pitch) > 0.8 or abs(roll) > 0.8:
             done = True
-            reward = -5
+            reward -= 5.0
         if distance_to_target < 0.1:
-            print("Reached Goal")
             done = True
-            reward+=100
+            reward+=100.0
 
         self.prev_distance = distance_to_target
         terminated = done
         truncated = self.counter > self.max_episode_steps
-        info = {}
+
         return obs, reward, terminated, truncated, info
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -193,8 +203,11 @@ def make_env(rank=0, seed=0):
 
 run_model = True
 model_name = "SAC_model"
-model_xx = "./old_models/front_flip"
+model_xx = "./logs/best_model.zip"
+model_best_xx = "./logs/best_model.zip"
 seed = 66
+
+model_to_run = model_xx
 
 if __name__ == "__main__":
     log_dir = "./logs/"
@@ -203,26 +216,27 @@ if __name__ == "__main__":
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     if run_model:
-        env = DummyVecEnv([lambda: QuadrupedEnv(render=True)])
-
-        model = SAC.load(model_name, env)
-        obs = env.reset()
+        env = QuadrupedEnv(render=True)
+        model = SAC.load(model_to_run)
+        obs, _ = env.reset()
+        env.max_episode_steps = np.inf
         done = False
-        for _ in range(10):
+        for ep in range(10):
             while not done:
-                action,_ = model.predict(obs, deterministic=False)
-                obs, reward, done, info = env.step(action)
-                #done = terminated or truncated
-                env.render()
-            env.reset()
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+                time.sleep(1/120)
+            obs, _ = env.reset()
             done = False
         env.close()
     else:
-        num_enviroments = 128 # code for making multiple enviroments 
+        num_enviroments = 48 # code for making multiple enviroments 
         if (num_enviroments > 1 ):
             env = DummyVecEnv([make_env(i, seed) for i in range(num_enviroments)])
         else:   
-            env = DummyVecEnv([lambda: Monitor(QuadrupedEnv(render=False))])
+            env = QuadrupedEnv(render=True)
+
 
 
         eval_env = DummyVecEnv([make_env(888, seed)])
@@ -230,7 +244,7 @@ if __name__ == "__main__":
             eval_env,
             best_model_save_path=log_dir,
             log_path=log_dir,
-            eval_freq=100_000 // num_enviroments,
+            eval_freq=500_000 // num_enviroments,
             deterministic=True,
             render=False
         )
@@ -244,16 +258,18 @@ if __name__ == "__main__":
             name_prefix="SAC_rex"
             )
 
-        sac_model = SAC(
-            "MlpPolicy",
-            env,
-            verbose=1,
-            tensorboard_log=log_dir,
-            learning_rate=1e-4)
+        # sac_model = SAC(
+        #     "MlpPolicy",
+        #     env,
+        #     verbose=0,
+        #     tensorboard_log=log_dir,
+        #     learning_rate=1e-4)
+
+        sac_model = SAC.load("base_model.zip", env=env)
         
         sac_model.set_logger(logger)
         callback = CallbackList([checkpoint_callback, eval_callback])
-        sac_model.learn(total_timesteps=5_000_000, progress_bar=True, callback=callback)
+        sac_model.learn(total_timesteps=10_000_000, progress_bar=True, callback=callback)
         sac_model.save(model_name)
 
         del sac_model
