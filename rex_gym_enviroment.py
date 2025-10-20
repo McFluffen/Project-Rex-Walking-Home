@@ -120,7 +120,7 @@ class QuadrupedEnv(gym.Env):
         roll, pitch, yaw = p.getEulerFromQuaternion(base_orn) # roll = sideways, ptich = forward/backward, yaw = left/right
         up_vector = p.getMatrixFromQuaternion(base_orn)[6]  # z-vector
         backward_penalty = max(0, -pitch)
-        forward_reward = max(0, pitch)
+        forward_reward = 0.0
         reward = 0.5*forward_reward+1.0 * height + 2.0 * up_vector + 0.8 *forward_vel - (5* distance_to_target) - 10*backward_penalty
 
         done = height < 0.2 or pitch < -0.7 or pitch > 0.7 # did not walk or just felly fell
@@ -149,20 +149,21 @@ def make_env(rank=0, seed=0):
 
 
 if __name__ == "__main__":
-    num_enviroments = 100 # code for making multiple enviroments 
+    '''
+    num_enviroments = 16 
     if (num_enviroments > 1 ):
-        env = DummyVecEnv([make_env(i) for i in range(4)])
+        env = DummyVecEnv([make_env(i) for i in range(num_enviroments)])
     else:   
         env = QuadrupedEnv(render=True)
 
-    ppo_model = PPO("MlpPolicy", env, verbose=0)
-    ppo_model.learn(total_timesteps=10000)
-    ppo_model.save("ppo_hello")
+    ppo_model = PPO("MlpPolicy", env, verbose=2)
+    ppo_model.learn(total_timesteps=100000,progress_bar=True)
+    ppo_model.save("ppo_standing_rex")
 
     del ppo_model
-
-    ppo_model = PPO.load("ppo_hello")
-
+    '''
+    ppo_model = PPO.load("ppo_standing_rex")
+    env = QuadrupedEnv(render=True)
     obs = env.reset()
     for _ in range(1000):
         action,_ = ppo_model.predict(obs, deterministic=True)
