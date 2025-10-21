@@ -13,6 +13,8 @@ filelock==3.20.0
 fonttools==4.60.1
 fsspec==2025.9.0
 grpcio==1.75.1
+gym==0.26.2
+gym-notices==0.1.0
 gymnasium==1.2.1
 ipykernel==7.0.1
 ipython==9.6.0
@@ -68,6 +70,7 @@ pytz==2025.2
 pyzmq==27.1.0
 rich==14.2.0
 setuptools==80.9.0
+Shimmy==2.0.0
 six==1.17.0
 stable_baselines3==2.7.0
 stack-data==0.6.3
